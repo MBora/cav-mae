@@ -191,32 +191,74 @@ class CAVMAE(nn.Module):
         imgs = x.reshape(shape=(x.shape[0], c, h * p, w * p))
         return imgs
 
-    def random_masking_unstructured(self, x, mask_ratio):
-        """
-        Perform per-sample random masking by per-sample shuffling.
-        Per-sample shuffling is done by argsort random noise.
-        x: [N, L, D], sequence
-        """
+    def random_masking_unstructured(self, x, mask_ratio, epoch_id, isAudio=True, video_mask=None, audio_mask=None, need_two=True, need_three=False):
+        # """
+        # Perform per-sample random masking by per-sample shuffling.
+        # Per-sample shuffling is done by argsort random noise.
+        # x: [N, L, D], sequence
+        # """
         N, L, D = x.shape  # batch, length, dim
         len_keep = int(L * (1 - mask_ratio))
 
         noise = torch.rand(N, L, device=x.device)  # noise in [0, 1]
 
-        # sort noise for each sample
-        ids_shuffle = torch.argsort(noise, dim=1)  # ascend: small is keep, large is remove
+        # Use precomputed shuffling indices if provided
+        if isAudio and audio_mask is not None:
+            ids_shuffle = audio_mask[:, epoch_id % 4]
+        elif not isAudio and video_mask is not None:
+            ids_shuffle = video_mask[:, (epoch_id % 40) // 10]
+        else:
+            ids_shuffle = torch.argsort(noise, dim=1)
         ids_restore = torch.argsort(ids_shuffle, dim=1)
 
-        # keep the first subset
-        ids_keep = ids_shuffle[:, :len_keep]
-        x_masked = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, D))
+        if need_two:
+            ids_keep = ids_shuffle[:, :len_keep]
+            x_masked = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, D))
 
-        # generate the binary mask: 0 is keep, 1 is remove
-        mask = torch.ones([N, L], device=x.device)
-        mask[:, :len_keep] = 0
-        # unshuffle to get the binary mask
-        mask = torch.gather(mask, dim=1, index=ids_restore)
+            # # Generate the binary mask: 0 is keep, 1 is remove
+            mask = torch.ones([N, L], device=x.device)
+            mask.scatter_(1, ids_keep, 0)
 
-        return x_masked, mask, ids_restore
+            ids_keep_1 = ids_shuffle[:, len_keep:2*len_keep]
+            x_masked_1 = torch.gather(x, dim=1, index=ids_keep_1.unsqueeze(-1).repeat(1, 1, D))
+
+            # # Generate the binary mask: 0 is keep, 1 is remove
+            mask_1 = torch.ones([N, L], device=x.device)
+            mask_1.scatter_(1, ids_keep_1, 0)
+
+            return x_masked, mask, ids_restore, x_masked_1, mask_1, ids_restore
+        elif need_three:
+            ids_keep = ids_shuffle[:, :len_keep]
+            x_masked = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, D))
+
+            # # Generate the binary mask: 0 is keep, 1 is remove
+            mask = torch.ones([N, L], device=x.device)
+            mask.scatter_(1, ids_keep, 0)
+
+            ids_keep_1 = ids_shuffle[:, len_keep:2*len_keep]
+            x_masked_1 = torch.gather(x, dim=1, index=ids_keep_1.unsqueeze(-1).repeat(1, 1, D))
+
+            # # Generate the binary mask: 0 is keep, 1 is remove
+            mask_1 = torch.ones([N, L], device=x.device)
+            mask_1.scatter_(1, ids_keep_1, 0)
+
+            ids_keep_2 = ids_shuffle[:, 2*len_keep:3*len_keep]
+            x_masked_2 = torch.gather(x, dim=1, index=ids_keep_2.unsqueeze(-1).repeat(1, 1, D))
+
+            # # Generate the binary mask: 0 is keep, 1 is remove
+            mask_2 = torch.ones([N, L], device=x.device)
+            mask_2.scatter_(1, ids_keep_2, 0)
+
+            return x_masked, mask, ids_restore, x_masked_1, mask_1, ids_restore, x_masked_2, mask_2, ids_restore
+        else:
+            ids_keep = ids_shuffle[:, :len_keep]
+            x_masked = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, D))
+
+            # # Generate the binary mask: 0 is keep, 1 is remove
+            mask = torch.ones([N, L], device=x.device)
+            mask.scatter_(1, ids_keep, 0)
+
+            return x_masked, mask, ids_restore
 
     def random_masking_structured(self, x, mask_ratio, t=64, f=8, mode='time'):
         """
@@ -267,7 +309,7 @@ class CAVMAE(nn.Module):
 
         return x_masked, mask, ids_restore
 
-    def forward_encoder(self, a, v, mask_ratio_a, mask_ratio_v, mask_mode='unstructured'):
+    def forward_encoder_dual_mask(self, epoch_id, a, v, mask_ratio_a, mask_ratio_v, mask_mode='unstructured', audio_mask=None, video_mask=None):
         # embed patches
         a = a.unsqueeze(1)
         a = a.transpose(2, 3)
@@ -281,74 +323,289 @@ class CAVMAE(nn.Module):
 
         # by default, we always use unstructured masking
         if mask_mode == 'unstructured':
-            a, mask_a, ids_restore_a = self.random_masking_unstructured(a, mask_ratio_a)
-        # in ablation study, we tried time/freq/tf masking. mode in ['freq', 'time', 'tf']
+            if self.complementary == False:
+                a1, mask_a1, ids_restore_a1 = self.random_masking_unstructured(a, mask_ratio_a, epoch_id, True, audio_mask=audio_mask, need_two=False)
+                a2, mask_a2, ids_restore_a2 = self.random_masking_unstructured(a, mask_ratio_a, epoch_id, True, audio_mask=audio_mask, need_two=False)
+            else:
+                a1, mask_a1, ids_restore_a1, a2, mask_a2, ids_restore_a2 = self.random_masking_unstructured(a, mask_ratio_a, epoch_id, True, audio_mask=audio_mask, need_two=True)
+
+            # p_x, vis_idx, mask_a2,  ids_restore_a2 = self.get_mask_a(a)
+            # in ablation study, we tried time/freq/tf masking. mode in ['freq', 'time', 'tf']
         else:
-            a, mask_a, ids_restore_a = self.random_masking_structured(a, mask_ratio_a, t=64, f=8, mode=mask_mode)
+            a1, mask_a1, ids_restore_a1 = self.random_masking_unstructured(a, mask_ratio_a, t=64, f=8, mode=mask_mode)
+            # p_x2, vis_idx2, mask_a2, ids_restore_a2 = self.get_mask_a(a, mask_ratio_a, t=64, f=8, mode=mask_mode)
 
         # visual branch always use unstructured masking
-        v, mask_v, ids_restore_v = self.random_masking_unstructured(v, mask_ratio_v)
 
-        # audio and visual stream, independent blocks
+        if self.complementary == False:
+            v1, mask_v1, ids_restore_v1 = self.random_masking_unstructured(v, mask_ratio_v, epoch_id, False, video_mask=video_mask, need_two=False)
+            v2, mask_v2, ids_restore_v2 = self.random_masking_unstructured(v, mask_ratio_v, epoch_id, False, video_mask=video_mask, need_two=False)
+        else:
+            v1, mask_v1, ids_restore_v1, v2, mask_v2, ids_restore_v2 = self.random_masking_unstructured(v, mask_ratio_v, epoch_id, False, video_mask=video_mask, need_two=True)
+        # # print common elements between mask_a1 and mask_a2
+        # matching_elements_count = 0
+        # for m1, m2 in zip(mask_a1.flatten(), mask_a2.flatten()):
+        #     if m1 == m2:
+        #         matching_elements_count += 1
+
+        # Process each masked audio and video input through their respective blocks
         for blk in self.blocks_a:
-            a = blk(a)
+            a1 = blk(a1)
+            a2 = blk(a2)  # You might need to clone the blocks if they are not stateless
 
         for blk in self.blocks_v:
-            v = blk(v)
+            v1 = blk(v1)
+            v2 = blk(v2)  # Similar cloning might be necessary
 
-        x = torch.cat((a, v), dim=1)
-
-        # unified stream, shared blocks_u, but independent normalization layers
-        for blk in self.blocks_u:
-            x = blk(x)
-        x = self.norm(x)
+        x1 = torch.cat((a1, v1), dim=1)
+        x2 = torch.cat((a2, v2), dim=1)
 
         for blk in self.blocks_u:
-            ca = blk(a, 'a')
-        ca = self.norm_a(ca)
+            x1 = blk(x1)
+            x2 = blk(x2)  # Again, consider cloning if needed
+        x1 = self.norm(x1)
+        x2 = self.norm(x2)
 
         for blk in self.blocks_u:
-            cv = blk(v, 'v')
-        cv = self.norm_v(cv)
+            ca1 = blk(a1, 'a')
+            ca2 = blk(a2, 'a')
+        ca1 = self.norm_a(ca1)
+        ca2 = self.norm_a(ca2)
 
-        return x, mask_a, ids_restore_a, mask_v, ids_restore_v, ca, cv
+        for blk in self.blocks_u:
+            cv1 = blk(v1, 'v')
+            cv2 = blk(v2, 'v')
+        cv1 = self.norm_v(cv1)
+        cv2 = self.norm_v(cv2)
 
-    def forward_decoder(self, x, mask_a, ids_restore_a, mask_v, ids_restore_v):
+        return x1, mask_a1, ids_restore_a1, mask_v1, ids_restore_v1, ca1, cv1, x2, mask_a2, ids_restore_a2, mask_v2, ids_restore_v2, ca2, cv2
 
-        x = self.decoder_embed(x)
+    def forward_encoder_triple_mask(self, epoch_id, a, v, mask_ratio_a, mask_ratio_v, mask_mode='unstructured', audio_mask=None, video_mask=None):
+        # embed patches
+        a = a.unsqueeze(1)
+        a = a.transpose(2, 3)
+        a = self.patch_embed_a(a)
+        a = a + self.pos_embed_a
+        a = a + self.modality_a
 
-        # append mask tokens to sequence
-        # mask_tokens_a in shape [B, #a_mask_token, mask_token_dim], get the number of masked samples from mask_a[0], which is the first example of the batch, all samples should have same number of masked tokens
-        mask_tokens_a = self.mask_token.repeat(x.shape[0], int(mask_a[0].sum()), 1)
-        a_ = torch.cat([x[:, :self.patch_embed_a.num_patches-int(mask_a[0].sum()), :], mask_tokens_a], dim=1)  # no cls token
-        a_ = torch.gather(a_, dim=1, index=ids_restore_a.unsqueeze(-1).repeat(1, 1, x.shape[2]))  # unshuffle
+        v = self.patch_embed_v(v)
+        v = v + self.pos_embed_v
+        v = v + self.modality_v
 
-        # similar for the visual modality
-        mask_tokens_v = self.mask_token.repeat(x.shape[0], int(mask_v[0].sum()), 1)
-        v_ = torch.cat([x[:, self.patch_embed_a.num_patches-int(mask_a[0].sum()):, :], mask_tokens_v], dim=1)  # no cls token
-        v_ = torch.gather(v_, dim=1, index=ids_restore_v.unsqueeze(-1).repeat(1, 1, x.shape[2]))  # unshuffle
+        # by default, we always use unstructured masking
+        if mask_mode == 'unstructured':
+            if self.complementary == False:
+                a1, mask_a1, ids_restore_a1 = self.random_masking_unstructured(a, mask_ratio_a, epoch_id, True, audio_mask=audio_mask, need_two=False)
+                a2, mask_a2, ids_restore_a2 = self.random_masking_unstructured(a, mask_ratio_a, epoch_id, True, audio_mask=audio_mask, need_two=False)
+                a3, mask_a3, ids_restore_a3 = self.random_masking_unstructured(a, mask_ratio_a, epoch_id, True, audio_mask=audio_mask, need_two=False)
+            else:
+                a1, mask_a1, ids_restore_a1, a2, mask_a2, ids_restore_a2, a3, mask_a3, ids_restore_a3 = self.random_masking_unstructured(a, mask_ratio_a, epoch_id, True, audio_mask=audio_mask, need_two=False, need_three=True)
 
-        # concatenate audio and visual tokens
-        x = torch.cat([a_, v_], dim=1)
+            # p_x, vis_idx, mask_a2,  ids_restore_a2 = self.get_mask_a(a)
+            # in ablation study, we tried time/freq/tf masking. mode in ['freq', 'time', 'tf']
+        else:
+            a1, mask_a1, ids_restore_a1 = self.random_masking_unstructured(a, mask_ratio_a, t=64, f=8, mode=mask_mode)
+            # p_x2, vis_idx2, mask_a2, ids_restore_a2 = self.get_mask_a(a, mask_ratio_a, t=64, f=8, mode=mask_mode)
 
-        decoder_pos_embed = torch.cat([self.decoder_pos_embed_a, self.decoder_pos_embed_v], dim=1)
-        x = x + decoder_pos_embed
+        # visual branch always use unstructured masking
 
-        # add modality indication tokens
-        x[:, 0:self.patch_embed_a.num_patches, :] = x[:, 0:self.patch_embed_a.num_patches, :] + self.decoder_modality_a
-        x[:, self.patch_embed_a.num_patches:, :] = x[:, self.patch_embed_a.num_patches:, :] + self.decoder_modality_v
+        if self.complementary == False:
+            v1, mask_v1, ids_restore_v1 = self.random_masking_unstructured(v, mask_ratio_v, epoch_id, False, video_mask=video_mask, need_two=False)
+            v2, mask_v2, ids_restore_v2 = self.random_masking_unstructured(v, mask_ratio_v, epoch_id, False, video_mask=video_mask, need_two=False)
+            v3, mask_v3, ids_restore_v3 = self.random_masking_unstructured(v, mask_ratio_v, epoch_id, False, video_mask=video_mask, need_two=False)
+        else:
+            v1, mask_v1, ids_restore_v1, v2, mask_v2, ids_restore_v2, v3, mask_v3, ids_restore_v3 = self.random_masking_unstructured(v, mask_ratio_v, epoch_id, False, video_mask=video_mask, need_two=False, need_three=True)
+        
+        # # print common elements between mask_a1 and mask_a2
+        # matching_elements_count = 0
+        # for m1, m2 in zip(mask_a1.flatten(), mask_a2.flatten()):
+        #     if m1 == m2:
+        #         matching_elements_count += 1
 
-        # apply Transformer blocks
-        for blk in self.decoder_blocks:
-            x = blk(x)
-        x = self.decoder_norm(x)
+        # Process each masked audio and video input through their respective blocks
+        for blk in self.blocks_a:
+            a1 = blk(a1)
+            a2 = blk(a2) 
+            a3 = blk(a3)
 
-        # predictor projection
-        x_a = self.decoder_pred_a(x[:, :self.patch_embed_a.num_patches, :])
-        x_v = self.decoder_pred_v(x[:, self.patch_embed_a.num_patches:, :])
+        for blk in self.blocks_v:
+            v1 = blk(v1)
+            v2 = blk(v2) 
+            v3 = blk(v3)
+        x1 = torch.cat((a1, v1), dim=1)
+        x2 = torch.cat((a2, v2), dim=1)
+        x3 = torch.cat((a3, v3), dim=1)
 
-        # return audio and video tokens
-        return x_a, x_v
+        for blk in self.blocks_u:
+            x1 = blk(x1)
+            x2 = blk(x2)  # Again, consider cloning if needed
+            x3 = blk(x3)
+        x1 = self.norm(x1)
+        x2 = self.norm(x2)
+        x3 = self.norm(x3)
+
+        for blk in self.blocks_u:
+            ca1 = blk(a1, 'a')
+            ca2 = blk(a2, 'a')
+            ca3 = blk(a3, 'a')
+        ca1 = self.norm_a(ca1)
+        ca2 = self.norm_a(ca2)
+        ca3 = self.norm_a(ca3)
+
+        for blk in self.blocks_u:
+            cv1 = blk(v1, 'v')
+            cv2 = blk(v2, 'v')
+            cv3 = blk(v3, 'v')
+        cv1 = self.norm_v(cv1)
+        cv2 = self.norm_v(cv2)
+        cv3 = self.norm_v(cv3)
+
+        return x1, mask_a1, ids_restore_a1, mask_v1, ids_restore_v1, ca1, cv1, x2, mask_a2, ids_restore_a2, mask_v2, ids_restore_v2, ca2, cv2, x3, mask_a3, ids_restore_a3, mask_v3, ids_restore_v3, ca3, cv3
+
+    def forward_decoder_dual_mask(self, x1, mask_a1, ids_restore_a1, mask_v1, ids_restore_v1, x2, mask_a2, ids_restore_a2, mask_v2, ids_restore_v2):
+            
+            x1 = self.decoder_embed(x1)
+            x2 = self.decoder_embed(x2)
+    
+            # append mask tokens to sequence
+            # mask_tokens_a in shape [B, #a_mask_token, mask_token_dim], get the number of masked samples from mask_a[0], which is the first example of the batch, all samples should have same number of masked tokens
+            mask_tokens_a1 = self.mask_token.repeat(x1.shape[0], int(mask_a1[0].sum()), 1)
+            a1_ = torch.cat([x1[:, :self.patch_embed_a.num_patches-int(mask_a1[0].sum()), :], mask_tokens_a1], dim=1)  # no cls token
+            a1_ = torch.gather(a1_, dim=1, index=ids_restore_a1.unsqueeze(-1).repeat(1, 1, x1.shape[2]))  # unshuffle
+
+            # similar for the visual modality
+            mask_tokens_v1 = self.mask_token.repeat(x1.shape[0], int(mask_v1[0].sum()), 1)
+            v1_ = torch.cat([x1[:, self.patch_embed_a.num_patches-int(mask_a1[0].sum()):, :], mask_tokens_v1], dim=1)  # no cls token
+            v1_ = torch.gather(v1_, dim=1, index=ids_restore_v1.unsqueeze(-1).repeat(1, 1, x1.shape[2]))  # unshuffle
+
+            # concatenate audio and visual tokens
+            x1 = torch.cat([a1_, v1_], dim=1) # Pass it separately
+
+            # append mask tokens to sequence
+            # mask_tokens_a in shape [B, #a_mask_token, mask_token_dim], get the number of masked samples from mask_a[0], which is the first example of the batch, all samples should have same number of masked tokens
+            mask_tokens_a2 = self.mask_token.repeat(x2.shape[0], int(mask_a2[0].sum()), 1)
+            a2_ = torch.cat([x2[:, :self.patch_embed_a.num_patches-int(mask_a2[0].sum()), :], mask_tokens_a2], dim=1)  # no cls token
+            a2_ = torch.gather(a2_, dim=1, index=ids_restore_a2.unsqueeze(-1).repeat(1, 1, x2.shape[2]))  # unshuffle
+
+            # similar for the visual modality
+            mask_tokens_v2 = self.mask_token.repeat(x2.shape[0], int(mask_v2[0].sum()), 1)
+            v2_ = torch.cat([x2[:, self.patch_embed_a.num_patches-int(mask_a2[0].sum()):, :], mask_tokens_v2], dim=1)
+            v2_ = torch.gather(v2_, dim=1, index=ids_restore_v2.unsqueeze(-1).repeat(1, 1, x2.shape[2]))
+
+            # concatenate audio and visual tokens
+            x2 = torch.cat([a2_, v2_], dim=1) # Pass it separately
+
+            decoder_pos_embed = torch.cat([self.decoder_pos_embed_a, self.decoder_pos_embed_v], dim=1)
+            x1 = x1 + decoder_pos_embed
+            x2 = x2 + decoder_pos_embed
+
+            # add modality indication tokens
+            x1[:, 0:self.patch_embed_a.num_patches, :] = x1[:, 0:self.patch_embed_a.num_patches, :] + self.decoder_modality_a
+            x1[:, self.patch_embed_a.num_patches:, :] = x1[:, self.patch_embed_a.num_patches:, :] + self.decoder_modality_v
+
+            x2[:, 0:self.patch_embed_a.num_patches, :] = x2[:, 0:self.patch_embed_a.num_patches, :] + self.decoder_modality_a
+            x2[:, self.patch_embed_a.num_patches:, :] = x2[:, self.patch_embed_a.num_patches:, :] + self.decoder_modality_v
+
+            # apply Transformer blocks
+            for blk in self.decoder_blocks:
+                x1 = blk(x1)
+                x2 = blk(x2)
+            x1 = self.decoder_norm(x1)
+            x2 = self.decoder_norm(x2)
+
+            # predictor projection
+            x_a1 = self.decoder_pred_a(x1[:, :self.patch_embed_a.num_patches, :])
+            x_v1 = self.decoder_pred_v(x1[:, self.patch_embed_a.num_patches:, :])
+
+            x_a2 = self.decoder_pred_a(x2[:, :self.patch_embed_a.num_patches, :])
+            x_v2 = self.decoder_pred_v(x2[:, self.patch_embed_a.num_patches:, :])
+
+            # return audio and video tokens
+            return x_a1, x_v1, x_a2, x_v2
+
+    # Forward decoder triple mask
+    def forward_decoder_triple_mask(self, x1, mask_a1, ids_restore_a1, mask_v1, ids_restore_v1, x2, mask_a2, ids_restore_a2, mask_v2, ids_restore_v2, x3, mask_a3, ids_restore_a3, mask_v3, ids_restore_v3):
+            
+            x1 = self.decoder_embed(x1)
+            x2 = self.decoder_embed(x2)
+            x3 = self.decoder_embed(x3)
+
+            # append mask tokens to sequence
+            # mask_tokens_a in shape [B, #a_mask_token, mask_token_dim], get the number of masked samples from mask_a[0], which is the first example of the batch, all samples should have same number of masked tokens
+            mask_tokens_a1 = self.mask_token.repeat(x1.shape[0], int(mask_a1[0].sum()), 1)
+            a1_ = torch.cat([x1[:, :self.patch_embed_a.num_patches-int(mask_a1[0].sum()), :], mask_tokens_a1], dim=1)  # no cls token
+            a1_ = torch.gather(a1_, dim=1, index=ids_restore_a1.unsqueeze(-1).repeat(1, 1, x1.shape[2]))  # unshuffle
+
+            # similar for the visual modality
+            mask_tokens_v1 = self.mask_token.repeat(x1.shape[0], int(mask_v1[0].sum()), 1)
+            v1_ = torch.cat([x1[:, self.patch_embed_a.num_patches-int(mask_a1[0].sum()):, :], mask_tokens_v1], dim=1)  # no cls token
+            v1_ = torch.gather(v1_, dim=1, index=ids_restore_v1.unsqueeze(-1).repeat(1, 1, x1.shape[2]))  # unshuffle
+
+            # concatenate audio and visual tokens
+            x1 = torch.cat([a1_, v1_], dim=1) # Pass it separately
+
+            # append mask tokens to sequence
+            # mask_tokens_a in shape [B, #a_mask_token, mask_token_dim], get the number of masked samples from mask_a[0], which is the first example of the batch, all samples should have same number of masked tokens
+            mask_tokens_a2 = self.mask_token.repeat(x2.shape[0], int(mask_a2[0].sum()), 1)
+            a2_ = torch.cat([x2[:, :self.patch_embed_a.num_patches-int(mask_a2[0].sum()), :], mask_tokens_a2], dim=1)  # no cls token
+            a2_ = torch.gather(a2_, dim=1, index=ids_restore_a2.unsqueeze(-1).repeat(1, 1, x2.shape[2]))  # unshuffle
+
+            # similar for the visual modality
+            mask_tokens_v2 = self.mask_token.repeat(x2.shape[0], int(mask_v2[0].sum()), 1)
+            v2_ = torch.cat([x2[:, self.patch_embed_a.num_patches-int(mask_a2[0].sum()):, :], mask_tokens_v2], dim=1)
+            v2_ = torch.gather(v2_, dim=1, index=ids_restore_v2.unsqueeze(-1).repeat(1, 1, x2.shape[2]))
+
+            # concatenate audio and visual tokens
+            x2 = torch.cat([a2_, v2_], dim=1) # Pass it separately
+            
+            mask_tokens_a3 = self.mask_token.repeat(x3.shape[0], int(mask_a3[0].sum()), 1)
+            a3_ = torch.cat([x3[:, :self.patch_embed_a.num_patches-int(mask_a3[0].sum()), :], mask_tokens_a3], dim=1)  # no cls token
+            a3_ = torch.gather(a3_, dim=1, index=ids_restore_a3.unsqueeze(-1).repeat(1, 1, x3.shape[2]))  # unshuffle
+
+            # similar for the visual modality
+            mask_tokens_v3 = self.mask_token.repeat(x3.shape[0], int(mask_v3[0].sum()), 1)
+            v3_ = torch.cat([x3[:, self.patch_embed_a.num_patches-int(mask_a3[0].sum()):, :], mask_tokens_v3], dim=1)
+            v3_ = torch.gather(v3_, dim=1, index=ids_restore_v3.unsqueeze(-1).repeat(1, 1, x3.shape[2]))
+
+            # concatenate audio and visual tokens
+            x3 = torch.cat([a3_, v3_], dim=1) # Pass it separately
+            
+            decoder_pos_embed = torch.cat([self.decoder_pos_embed_a, self.decoder_pos_embed_v], dim=1)
+            x1 = x1 + decoder_pos_embed
+            x2 = x2 + decoder_pos_embed
+            x3 = x3 + decoder_pos_embed
+
+            # add modality indication tokens
+            x1[:, 0:self.patch_embed_a.num_patches, :] = x1[:, 0:self.patch_embed_a.num_patches, :] + self.decoder_modality_a
+            x1[:, self.patch_embed_a.num_patches:, :] = x1[:, self.patch_embed_a.num_patches:, :] + self.decoder_modality_v
+
+            x2[:, 0:self.patch_embed_a.num_patches, :] = x2[:, 0:self.patch_embed_a.num_patches, :] + self.decoder_modality_a
+            x2[:, self.patch_embed_a.num_patches:, :] = x2[:, self.patch_embed_a.num_patches:, :] + self.decoder_modality_v
+
+            x3[:, 0:self.patch_embed_a.num_patches, :] = x3[:, 0:self.patch_embed_a.num_patches, :] + self.decoder_modality_a
+            x3[:, self.patch_embed_a.num_patches:, :] = x3[:, self.patch_embed_a.num_patches:, :] + self.decoder_modality_v
+
+            # apply Transformer blocks
+            for blk in self.decoder_blocks:
+                x1 = blk(x1)
+                x2 = blk(x2)
+                x3 = blk(x3)
+            x1 = self.decoder_norm(x1)
+            x2 = self.decoder_norm(x2)
+            x3 = self.decoder_norm(x3)
+
+            # predictor projection
+            x_a1 = self.decoder_pred_a(x1[:, :self.patch_embed_a.num_patches, :])
+            x_v1 = self.decoder_pred_v(x1[:, self.patch_embed_a.num_patches:, :])
+
+            x_a2 = self.decoder_pred_a(x2[:, :self.patch_embed_a.num_patches, :])
+            x_v2 = self.decoder_pred_v(x2[:, self.patch_embed_a.num_patches:, :])
+            
+            x_a3 = self.decoder_pred_a(x3[:, :self.patch_embed_a.num_patches, :])
+            x_v3 = self.decoder_pred_v(x3[:, self.patch_embed_a.num_patches:, :])
+
+            # return audio and video tokens
+            return x_a1, x_v1, x_a2, x_v2, x_a3, x_v3
 
     def forward_contrastive(self, audio_rep, video_rep, bidirect_contrast=False):
         # calculate nce loss for mean-visual representation and mean-audio representation

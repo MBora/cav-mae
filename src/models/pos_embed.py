@@ -23,8 +23,8 @@ import torch
 #     return:
 #     pos_embed: [grid_size*grid_size, embed_dim] or [1+grid_size*grid_size, embed_dim] (w/ or w/o cls_token)
 #     """
-#     grid_h = np.arange(grid_size, dtype=np.float32)
-#     grid_w = np.arange(grid_size, dtype=np.float32)
+#     grid_h = np.arange(grid_size, dtype=float)
+#     grid_w = np.arange(grid_size, dtype=float)
 #     grid = np.meshgrid(grid_w, grid_h)  # here w goes first
 #     grid = np.stack(grid, axis=0)
 #
@@ -40,8 +40,8 @@ def get_2d_sincos_pos_embed(embed_dim, grid_h_size, grid_w_size, cls_token=False
     return:
     pos_embed: [grid_size*grid_size, embed_dim] or [1+grid_size*grid_size, embed_dim] (w/ or w/o cls_token)
     """
-    grid_h = np.arange(grid_h_size, dtype=np.float32)
-    grid_w = np.arange(grid_w_size, dtype=np.float32)
+    grid_h = np.arange(grid_h_size, dtype=float)
+    grid_w = np.arange(grid_w_size, dtype=float)
     grid = np.meshgrid(grid_w, grid_h)  # here w goes first
     grid = np.stack(grid, axis=0)
 
